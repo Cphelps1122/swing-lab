@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isCoach() {
+      return request.auth != null && (request.auth.token.email.lower() == 'rice.chris.p4991@gmail.com'
+        || firestore.exists(/databases/(default)/documents/coaches/$(request.auth.token.email.lower())));
+    }
+    match /media/{file} {
+      // videos play through their private link, which only reaches people who can see the swing
+      allow read: if request.auth != null;
+      allow create, update: if isCoach() && request.resource.size < 25 * 1024 * 1024;
+      allow delete: if isCoach();
+    }
+  }
+}

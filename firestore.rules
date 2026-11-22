@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.email != null; }
+    function me() { return request.auth.token.email.lower(); }
+    function isOwner() { return signedIn() && me() == 'rice.chris.p4991@gmail.com'; }
+    function isCoach() { return isOwner() || (signedIn() && exists(/databases/$(db)/documents/coaches/$(me()))); }
+
+    match /coaches/{email} {
+      allow read: if signedIn();
+      allow write: if isOwner();
+    }
+    match /players/{email} {
+      allow read: if isCoach() || (signedIn() && email == me());
+      allow write: if isCoach();
+    }
+    match /sessions/{id} {
+      allow read: if signedIn();
+      allow write: if isCoach();
+    }
+    match /swings/{id} {
+      allow read: if isCoach() || (signedIn() && resource.data.playerEmail == me());
+      allow write: if isCoach();
+    }
+    match /pitches/{id} {
+      allow read: if isCoach() || (signedIn() && resource.data.playerEmail == me());
+      allow write: if isCoach();
+    }
+  }
+}
