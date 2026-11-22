@@ -1464,10 +1464,11 @@ function batScores(rgb,prev,W,H,hx,hy,L,hip,fwd){
   return out;
 }
 // best smooth path of bat directions through all frames
-function batViterbi(S,turnCost){
+function batViterbi(S,turnCost,dts){
+  // a bat turns at most ~1800°/s at peak; slower before launch (turnCost>1)
   const NA=120, T=S.length; if(!T) return []; let cost=Float32Array.from(S[0]); const back=[];
-  for(let t=1;t<T;t++){ const nc=new Float32Array(NA), bk=new Int16Array(NA);
-    for(let j=0;j<NA;j++){ let bv=-1e9,bi=0; for(let i=0;i<NA;i++){ const d=Math.min(Math.abs(i-j),NA-Math.abs(i-j))*3; const v=cost[i]-turnCost[t]*d/30; if(v>bv){bv=v;bi=i;} } nc[j]=bv+S[t][j]; bk[j]=bi; }
+  for(let t=1;t<T;t++){ const nc=new Float32Array(NA), bk=new Int16Array(NA); const lim=Math.max(6,1800*(dts?dts[t]:1/30));
+    for(let j=0;j<NA;j++){ let bv=-1e9,bi=0; for(let i=0;i<NA;i++){ const d=Math.min(Math.abs(i-j),NA-Math.abs(i-j))*3; if(d>1.6*lim) continue; const r=d/lim; const v=cost[i]-turnCost[t]*2.5*r*r; if(v>bv){bv=v;bi=i;} } nc[j]=bv+S[t][j]; bk[j]=bi; }
     back.push(bk); cost=nc; }
   let j=0; for(let i=1;i<NA;i++) if(cost[i]>cost[j]) j=i; const path=[j]; for(let t=T-2;t>=0;t--){ j=back[t][j]; path.unshift(j); }
   return path.map(i=>i*3);
@@ -1508,10 +1509,15 @@ async function traceBat(info,vw,vh,PW,opt={}){
     prog(0.56+0.12*(i+1)/times.length,`Tracking the swing… frame ${i+1} of ${times.length}`);
   }
   // smooth bat directions over the whole swing: slow turning before launch, fast through the zone
-  const turn=raw.map((q,i)=>{ if(!i) return 1; const v=Math.hypot(q.hx-raw[i-1].hx,q.hy-raw[i-1].hy)/batLen; return Math.max(0.15,1.2-3*v); });
-  const ang=batViterbi(SC,turn);
+  const turn=raw.map((q,i)=>{ if(!i) return 1; const v=Math.hypot(q.hx-raw[i-1].hx,q.hy-raw[i-1].hy)/batLen/((q.t-raw[i-1].t)||fdt); return Math.max(0.3,1.5-0.25*v); });
+  const dts=raw.map((q,i)=> i? (q.t-raw[i-1].t)/k : step_/k);
+  let ang=batViterbi(SC,turn,dts);
+  // light smoothing of hands and bat angle over ~1/60 s of real time, so the drawn path is clean
+  const un=[ang[0]]; for(let i=1;i<ang.length;i++){ let d=ang[i]-un[i-1]; d=((d%360)+540)%360-180; un.push(un[i-1]+d); }
+  const sm=(arr)=>arr.map((_,i)=>{ let s=0,w=0; for(let j=0;j<arr.length;j++){ const dt=(raw[j].t-raw[i].t)/k; const ww=Math.exp(-0.5*(dt/0.006)**2); s+=arr[j]*ww; w+=ww; } return s/w; });
+  const A2=sm(un), HX=sm(raw.map(q=>q.hx)), HY=sm(raw.map(q=>q.hy));
   const toProc=(x,y)=>({x:(sx+x/cs)/s, y:(sy+y/cs)/s});
-  for(let i=0;i<raw.length;i++){ const q=raw[i], r=ang[i]*Math.PI/180; q.knob=toProc(q.hx,q.hy); q.tip=toProc(q.hx+Math.cos(r)*batLen,q.hy+Math.sin(r)*batLen); }
+  for(let i=0;i<raw.length;i++){ const q=raw[i], r=A2[i]*Math.PI/180; q.hx=HX[i]; q.hy=HY[i]; q.knob=toProc(q.hx,q.hy); q.tip=toProc(q.hx+Math.cos(r)*batLen,q.hy+Math.sin(r)*batLen); }
   // launch = first frame where the hands' forward speed passes 35% of its peak before contact
   let launchT=null; { const pre=raw.filter(q=>q.t<=tc+fdt);
     const sp=pre.map((q,i)=> i? Math.hypot(q.knob.x-pre[i-1].knob.x,q.knob.y-pre[i-1].knob.y)/(q.t-pre[i-1].t) : 0);
@@ -1520,7 +1526,8 @@ async function traceBat(info,vw,vh,PW,opt={}){
   const keys=raw.filter((q,i)=>{ if(i===0||i===raw.length-1) return true; const a=(p)=>Math.atan2(p.tip.y-p.knob.y,p.tip.x-p.knob.x);
     const d1=Math.abs(Math.atan2(Math.sin(a(q)-a(raw[i-1])),Math.cos(a(q)-a(raw[i-1])))), d2=Math.abs(Math.atan2(Math.sin(a(q)-a(raw[i+1])),Math.cos(a(q)-a(raw[i+1]))));
     return !(d1>2.2&&d2>2.2); });
-  return {keys, launchT, crop:{sx,sy,cw,ch}};
+  let ks=keys; if(ks.length>22){ const every=Math.ceil(ks.length/18); ks=ks.filter((q,i)=> i%every===0 || i===ks.length-1 || Math.abs(q.t-tc)<=2.5*fdt); }
+  return {keys:ks, allKeys:keys, launchT, crop:{sx,sy,cw,ch}};
 }
 
 /* ================================================================== SPLINES */
@@ -1862,7 +1869,7 @@ async function analyze(file,opts){
         try{ B=await traceBat(bi,vw,vh,PW); } catch(e1){ throw e1; }
         if(B.keys.length>=5){ const tipD=catmull(B.keys.map(q=>({t:q.t,x:q.tip.x,y:q.tip.y})),10), knobD=catmull(B.keys.map(q=>({t:q.t,x:q.knob.x,y:q.knob.y})),10);
           const t0=B.keys[0].t, t1=B.keys[B.keys.length-1].t; const tl=B.launchT && B.launchT<tc ? B.launchT : tc-0.15*k;
-          A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.keys,tc,k,scale); step("bat","done"); }
+          A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.allKeys||B.keys,tc,k,scale); if(!(A.batSpeed>15&&A.batSpeed<(isBB()?95:85))){ flags.push("Bat speed couldn\u2019t be read reliably on this clip, so it was left out."); A.batSpeed=null; } if(!(A.l2c>0.08&&A.l2c<0.4)){ A.l2c=null; } step("bat","done"); }
         else { flags.push("Body tracking couldn't place the bat in enough frames, so the bat path was skipped."); step("bat","skip"); }
       }catch(e){ if(JOB.abort) throw e; const code=e&&e.code; flags.push("Bat tracing was skipped ("+(code||e.message||"error")+"). Check your connection the first time; the body-tracking model downloads once."); step("bat","skip"); }
     } else step("bat","skip");
