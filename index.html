@@ -1467,7 +1467,7 @@ function batScores(rgb,prev,W,H,hx,hy,L,hip,fwd){
 function batViterbi(S,turnCost,dts){
   // a bat turns at most ~1800°/s at peak; slower before launch (turnCost>1)
   const NA=120, T=S.length; if(!T) return []; let cost=Float32Array.from(S[0]); const back=[];
-  for(let t=1;t<T;t++){ const nc=new Float32Array(NA), bk=new Int16Array(NA); const lim=Math.max(6,1800*(dts?dts[t]:1/30));
+  for(let t=1;t<T;t++){ const nc=new Float32Array(NA), bk=new Int16Array(NA); const lim=Math.max(6,2600*(dts?dts[t]:1/30));
     for(let j=0;j<NA;j++){ let bv=-1e9,bi=0; for(let i=0;i<NA;i++){ const d=Math.min(Math.abs(i-j),NA-Math.abs(i-j))*3; if(d>1.6*lim) continue; const r=d/lim; const v=cost[i]-turnCost[t]*2.5*r*r; if(v>bv){bv=v;bi=i;} } nc[j]=bv+S[t][j]; bk[j]=bi; }
     back.push(bk); cost=nc; }
   let j=0; for(let i=1;i<NA;i++) if(cost[i]>cost[j]) j=i; const path=[j]; for(let t=T-2;t>=0;t--){ j=back[t][j]; path.unshift(j); }
@@ -1514,7 +1514,7 @@ async function traceBat(info,vw,vh,PW,opt={}){
   let ang=batViterbi(SC,turn,dts);
   // light smoothing of hands and bat angle over ~1/60 s of real time, so the drawn path is clean
   const un=[ang[0]]; for(let i=1;i<ang.length;i++){ let d=ang[i]-un[i-1]; d=((d%360)+540)%360-180; un.push(un[i-1]+d); }
-  const sm=(arr)=>arr.map((_,i)=>{ let s=0,w=0; for(let j=0;j<arr.length;j++){ const dt=(raw[j].t-raw[i].t)/k; const ww=Math.exp(-0.5*(dt/0.006)**2); s+=arr[j]*ww; w+=ww; } return s/w; });
+  const sm=(arr)=>arr.map((_,i)=>{ let s=0,w=0; for(let j=0;j<arr.length;j++){ const dt=(raw[j].t-raw[i].t)/k; const ww=Math.exp(-0.5*(dt/0.010)**2); s+=arr[j]*ww; w+=ww; } return s/w; });
   const A2=sm(un), HX=sm(raw.map(q=>q.hx)), HY=sm(raw.map(q=>q.hy));
   const toProc=(x,y)=>({x:(sx+x/cs)/s, y:(sy+y/cs)/s});
   for(let i=0;i<raw.length;i++){ const q=raw[i], r=A2[i]*Math.PI/180; q.hx=HX[i]; q.hy=HY[i]; q.knob=toProc(q.hx,q.hy); q.tip=toProc(q.hx+Math.cos(r)*batLen,q.hy+Math.sin(r)*batLen); }
@@ -1869,7 +1869,7 @@ async function analyze(file,opts){
         try{ B=await traceBat(bi,vw,vh,PW); } catch(e1){ throw e1; }
         if(B.keys.length>=5){ const tipD=catmull(B.keys.map(q=>({t:q.t,x:q.tip.x,y:q.tip.y})),10), knobD=catmull(B.keys.map(q=>({t:q.t,x:q.knob.x,y:q.knob.y})),10);
           const t0=B.keys[0].t, t1=B.keys[B.keys.length-1].t; const tl=B.launchT && B.launchT<tc ? B.launchT : tc-0.15*k;
-          A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.allKeys||B.keys,tc,k,scale); if(!(A.batSpeed>15&&A.batSpeed<(isBB()?95:85))){ flags.push("Bat speed couldn\u2019t be read reliably on this clip, so it was left out."); A.batSpeed=null; } if(!(A.l2c>0.08&&A.l2c<0.4)){ A.l2c=null; } step("bat","done"); }
+          A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.allKeys||B.keys,tc,k,scale); window.__rawBat=A.batSpeed; if(!(A.batSpeed>15&&A.batSpeed<(isBB()?95:85))){ flags.push("Bat speed couldn\u2019t be read reliably on this clip, so it was left out."); A.batSpeed=null; } if(!(A.l2c>0.08&&A.l2c<0.4)){ A.l2c=null; } step("bat","done"); }
         else { flags.push("Body tracking couldn't place the bat in enough frames, so the bat path was skipped."); step("bat","skip"); }
       }catch(e){ if(JOB.abort) throw e; const code=e&&e.code; flags.push("Bat tracing was skipped ("+(code||e.message||"error")+"). Check your connection the first time; the body-tracking model downloads once."); step("bat","skip"); }
     } else step("bat","skip");
