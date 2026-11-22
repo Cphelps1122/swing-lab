@@ -1,0 +1,59 @@
+<html><body><canvas id=c></canvas><script type=module>
+let POSE=null;
+async function poseModel(){
+  if(POSE) return POSE;
+  const V=await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+  const fs_=await V.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const mk=(d)=>V.PoseLandmarker.createFromOptions(fs_,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",delegate:d},runningMode:"IMAGE",numPoses:3});
+  try{ POSE=await mk("GPU"); }catch{ POSE=await mk("CPU"); }
+  return POSE;
+}
+// scores every direction (3° steps) for "the bat leaves the hands this way": an even-coloured strip that stands out
+// from both sides, ends at bat length, and moved since the last frame. Directions are picked later across all frames.
+function batScores(rgb,prev,W,H,hx,hy,L,hip,fwd){
+  const NA=120, out=new Float32Array(NA); const w=Math.max(2,L*0.035);
+  const px=(D,x,y)=>{ x|=0; y|=0; if(x<1||y<1||x>=W-1||y>=H-1) return null; const p=(y*W+x)*4; return [D[p],D[p+1],D[p+2]]; };
+  const dist=(a,b)=>Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1])+Math.abs(a[2]-b[2]);
+  const line=(dx,dy,nx,ny,u0,u1)=>{ let sc=0,mv=0,n=0; const cs=[];
+    for(let u=u0;u<=u1;u+=Math.max(1,L/30)){ const x=hx+dx*u, y=hy+dy*u; const c=px(rgb,x,y), a1=px(rgb,x+nx*w,y+ny*w), a2=px(rgb,x-nx*w,y-ny*w); if(!c||!a1||!a2) continue;
+      sc+=Math.min(dist(c,a1),dist(c,a2)); if(prev){ const q=px(prev,x,y); mv+=dist(c,q); } cs.push(c); n++; }
+    if(n<4) return null; const m=[0,1,2].map(k=>cs.reduce((a,c)=>a+c[k],0)/n); const sd=cs.reduce((a,c)=>a+dist(c,m),0)/n;
+    return {s:sc/n, mv:mv/n, sd}; };
+  for(let i=0;i<NA;i++){ const r=i*3*Math.PI/180, dx=Math.cos(r), dy=Math.sin(r), nx=-dy, ny=dx;
+    const In=line(dx,dy,nx,ny,0.2*L,L); if(!In){ out[i]=-1e3; continue; }
+    const Out=line(dx,dy,nx,ny,1.15*L,1.6*L);
+    out[i]= In.s/(1+In.sd/60) - (Out? 0.7*Out.s:0) + 0.6*In.mv - (Out? 0.4*Out.mv:0); }
+  // the bat never points back into the batter's body, and around contact the barrel is out front toward the pitcher
+  const bodyA=hip? Math.atan2(hip.y-hy,hip.x-hx) : null;
+  for(let i=0;i<NA;i++){ if(out[i]<=-1e3) continue; const r=i*3*Math.PI/180;
+    if(bodyA!=null){ const d=Math.abs(Math.atan2(Math.sin(r-bodyA),Math.cos(r-bodyA))); if(d<0.9) out[i]-=40*(1-d/0.9); }
+    if(fwd){ const c=Math.cos(r)*fwd; if(c<0) out[i]+=60*c; } }
+  // normalise per frame
+  let m=0,n=0; for(const v of out) if(v>-1e3){m+=v;n++;} m/=Math.max(1,n); let sd=0; for(const v of out) if(v>-1e3) sd+=(v-m)*(v-m); sd=Math.sqrt(sd/Math.max(1,n))||1;
+  for(let i=0;i<NA;i++) out[i]= out[i]>-1e3? (out[i]-m)/sd : -9;
+  return out;
+}
+// best smooth path of bat directions through all frames
+function batViterbi(S,turnCost){
+  const NA=120, T=S.length; if(!T) return []; let cost=Float32Array.from(S[0]); const back=[];
+  for(let t=1;t<T;t++){ const nc=new Float32Array(NA), bk=new Int16Array(NA);
+    for(let j=0;j<NA;j++){ let bv=-1e9,bi=0; for(let i=0;i<NA;i++){ const d=Math.min(Math.abs(i-j),NA-Math.abs(i-j))*3; const v=cost[i]-turnCost[t]*d/30; if(v>bv){bv=v;bi=i;} } nc[j]=bv+S[t][j]; bk[j]=bi; }
+    back.push(bk); cost=nc; }
+  let j=0; for(let i=1;i<NA;i++) if(cost[i]>cost[j]) j=i; const path=[j]; for(let t=T-2;t>=0;t--){ j=back[t][j]; path.unshift(j); }
+  return path.map(i=>i*3);
+}
+
+const W=640,H=384,N=15; const c=document.getElementById('c'); c.width=W*5; c.height=H*3; const g2=c.getContext('2d');
+const off=document.createElement('canvas'); off.width=W; off.height=H; const ox=off.getContext('2d',{willReadFrequently:true});
+const pose=await poseModel(); let prevD=null, prevH=null; const out=[], SC=[], HS=[];
+for(let i=0;i<N;i++){ const im=new Image(); im.src=`fr${String(i+1).padStart(2,'0')}.png`; await im.decode(); ox.drawImage(im,0,0);
+  const d=ox.getImageData(0,0,W,H).data; const g=new Uint8Array(W*H); for(let q=0,p=0;q<g.length;q++,p+=4) g[q]=(d[p]*3+d[p+1]*6+d[p+2])/10;
+  const res=pose.detect(off); const P=res.landmarks||[]; let who=null,bd=1e9;
+  for(const lm of P){ const hx=(lm[15].x+lm[16].x)/2*W, hy=(lm[15].y+lm[16].y)/2*H; const dd=Math.hypot(hx-0.45*W,hy-0.4*H)+(prevH?Math.hypot(hx-prevH.x,hy-prevH.y):0); if(dd<bd){bd=dd;who={lm,hx,hy};} }
+  const X=(i%5)*W, Y=Math.floor(i/5)*H; g2.drawImage(off,X,Y);
+  if(who){ const {hx,hy}=who; prevH={x:hx,y:hy}; HS.push({i,hx,hy,X,Y}); const lm=who.lm; const hip={x:(lm[23].x+lm[24].x)/2*W,y:(lm[23].y+lm[24].y)/2*H}; SC.push(batScores(d,prevD,W,H,hx,hy,0.2*W,hip,(i>=7&&i<=9)?1:0)); prevD=d; } }
+const turn=HS.map((q,k)=>{ if(!k) return 1; const v=Math.hypot(q.hx-HS[k-1].hx,q.hy-HS[k-1].hy)/(0.2*W); return Math.max(0.15,1.2-3*v); });
+const ang=batViterbi(SC,turn); const L=0.2*W;
+HS.forEach((q,k)=>{ const r=ang[k]*Math.PI/180; g2.fillStyle='#0f0'; g2.beginPath(); g2.arc(q.X+q.hx,q.Y+q.hy,5,0,7); g2.fill(); g2.strokeStyle='#0ff'; g2.lineWidth=4; g2.beginPath(); g2.moveTo(q.X+q.hx,q.Y+q.hy); g2.lineTo(q.X+q.hx+Math.cos(r)*L,q.Y+q.hy+Math.sin(r)*L); g2.stroke(); out.push([q.i,ang[k]]); });
+window.DONE=out;
+</script></body></html>

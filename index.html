@@ -371,7 +371,7 @@ table.t tbody tr:hover td{background:var(--surface-2)}
         </div>
         <p class="note">Speeds are scaled from the ball's size on screen and checked against the pitch. Entering the pitch speed from a radar gun makes every number more reliable.</p>
       </details>
-      <label class="inline-check"><input type="checkbox" id="useBat" checked><span>Trace the bat path with Claude (adds about 30–60 seconds; uses your Claude account)</span></label>
+      <label class="inline-check"><input type="checkbox" id="useBat" checked><span>Trace the bat path with body tracking (runs on this device; adds about 10–30 seconds)</span></label>
       <div class="row"><button class="btn primary" type="button" id="analyzeBtn" disabled>Analyze swing</button><span class="note">Keep this screen open until it finishes.</span></div>
     </div>
 
@@ -590,7 +590,6 @@ async function initCaps(){
   const ctx = await C.ready();   // waits for sign-in
   Object.assign(S,{db:ctx.db,user:ctx.user,assets:ctx.assets,sample:null,downloads:ctx.downloads});
   S.myId = ctx.uid; S.canEditAll = ctx.isCoach;
-  $("#useBat").checked = false; $("#useBat").disabled = true; $("#useBat").nextElementSibling.textContent = "Bat path tracing isn't available on this version yet.";
   const db = ctx.db;
   const sortBy=(k)=>(a,b)=>String(b[k]||"").localeCompare(String(a[k]||""));
   const live=(q,k,set,onErr)=>q.onSnapshot((snap)=>{ set(snap.docs.map(d=>({id:d.id,...d.data()})).sort(sortBy(k))); applySport(); }, onErr||(()=>{}));
@@ -1429,56 +1428,98 @@ function flight(evMph,laDeg,hFt){
 }
 function resultOf(la){ if(la==null) return ""; if(la<10) return "Ground ball"; if(la<25) return "Line drive"; if(la<50) return "Fly ball"; return "Pop-up"; }
 
-/* ================================================================== BAT PATH (Claude) */
+/* ================================================================== BAT PATH (on-phone body tracking) */
+let POSE=null;
+async function poseModel(){
+  if(POSE) return POSE;
+  const V=await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+  const fs_=await V.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const mk=(d)=>V.PoseLandmarker.createFromOptions(fs_,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",delegate:d},runningMode:"IMAGE",numPoses:3});
+  try{ POSE=await mk("GPU"); }catch{ POSE=await mk("CPU"); }
+  return POSE;
+}
+// scores every direction (3° steps) for "the bat leaves the hands this way": an even-coloured strip that stands out
+// from both sides, ends at bat length, and moved since the last frame. Directions are picked later across all frames.
+function batScores(rgb,prev,W,H,hx,hy,L,hip,fwd){
+  const NA=120, out=new Float32Array(NA); const w=Math.max(2,L*0.035);
+  const px=(D,x,y)=>{ x|=0; y|=0; if(x<1||y<1||x>=W-1||y>=H-1) return null; const p=(y*W+x)*4; return [D[p],D[p+1],D[p+2]]; };
+  const dist=(a,b)=>Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1])+Math.abs(a[2]-b[2]);
+  const line=(dx,dy,nx,ny,u0,u1)=>{ let sc=0,mv=0,n=0; const cs=[];
+    for(let u=u0;u<=u1;u+=Math.max(1,L/30)){ const x=hx+dx*u, y=hy+dy*u; const c=px(rgb,x,y), a1=px(rgb,x+nx*w,y+ny*w), a2=px(rgb,x-nx*w,y-ny*w); if(!c||!a1||!a2) continue;
+      sc+=Math.min(dist(c,a1),dist(c,a2)); if(prev){ const q=px(prev,x,y); mv+=dist(c,q); } cs.push(c); n++; }
+    if(n<4) return null; const m=[0,1,2].map(k=>cs.reduce((a,c)=>a+c[k],0)/n); const sd=cs.reduce((a,c)=>a+dist(c,m),0)/n;
+    return {s:sc/n, mv:mv/n, sd}; };
+  for(let i=0;i<NA;i++){ const r=i*3*Math.PI/180, dx=Math.cos(r), dy=Math.sin(r), nx=-dy, ny=dx;
+    const In=line(dx,dy,nx,ny,0.2*L,L); if(!In){ out[i]=-1e3; continue; }
+    const Out=line(dx,dy,nx,ny,1.15*L,1.6*L);
+    out[i]= In.s/(1+In.sd/60) - (Out? 0.7*Out.s:0) + 0.6*In.mv - (Out? 0.4*Out.mv:0); }
+  // the bat never points back into the batter's body, and around contact the barrel is out front toward the pitcher
+  const bodyA=hip? Math.atan2(hip.y-hy,hip.x-hx) : null;
+  for(let i=0;i<NA;i++){ if(out[i]<=-1e3) continue; const r=i*3*Math.PI/180;
+    if(bodyA!=null){ const d=Math.abs(Math.atan2(Math.sin(r-bodyA),Math.cos(r-bodyA))); if(d<0.9) out[i]-=40*(1-d/0.9); }
+    if(fwd){ const c=Math.cos(r)*fwd; if(c<0) out[i]+=60*c; } }
+  // normalise per frame
+  let m=0,n=0; for(const v of out) if(v>-1e3){m+=v;n++;} m/=Math.max(1,n); let sd=0; for(const v of out) if(v>-1e3) sd+=(v-m)*(v-m); sd=Math.sqrt(sd/Math.max(1,n))||1;
+  for(let i=0;i<NA;i++) out[i]= out[i]>-1e3? (out[i]-m)/sd : -9;
+  return out;
+}
+// best smooth path of bat directions through all frames
+function batViterbi(S,turnCost){
+  const NA=120, T=S.length; if(!T) return []; let cost=Float32Array.from(S[0]); const back=[];
+  for(let t=1;t<T;t++){ const nc=new Float32Array(NA), bk=new Int16Array(NA);
+    for(let j=0;j<NA;j++){ let bv=-1e9,bi=0; for(let i=0;i<NA;i++){ const d=Math.min(Math.abs(i-j),NA-Math.abs(i-j))*3; const v=cost[i]-turnCost[t]*d/30; if(v>bv){bv=v;bi=i;} } nc[j]=bv+S[t][j]; bk[j]=bi; }
+    back.push(bk); cost=nc; }
+  let j=0; for(let i=1;i<NA;i++) if(cost[i]>cost[j]) j=i; const path=[j]; for(let t=T-2;t>=0;t--){ j=back[t][j]; path.unshift(j); }
+  return path.map(i=>i*3);
+}
 async function traceBat(info,vw,vh,PW,opt={}){
   const {tc,k,scale,contact,pitchDirX}=info; const s=vw/PW; const fdt=info.fps? 1/info.fps : (info.fdt||1/30);
-  const ftPx = scale*s;                       // native px per foot
-  const side = pitchDirX>0? -1 : 1;           // catcher side is opposite the pitch's direction of travel… pitch moves toward catcher
-  // batter stands slightly toward the catcher side of contact
+  const ftPx = scale*s;
   let cw=10*ftPx, ch=8*ftPx; cw=Math.min(cw,vw); ch=Math.min(ch,vh);
   let sx=contact.x*s - cw/2 + (pitchDirX>0? 1.5:-1.5)*ftPx; let sy=contact.y*s - 5.5*ftPx;
   sx=Math.max(0,Math.min(vw-cw,sx)); sy=Math.max(0,Math.min(vh-ch,sy));
-  // the whole swing at coarse steps, plus every frame right around contact so bat speed can be measured frame to frame
-  const coarse=[-0.45,-0.34,-0.25,-0.18,-0.12,-0.08,0.09,0.15,0.22,0.3,0.4].map(o=>tc+o*k);
-  const n0=Math.floor(tc/fdt+1e-6); const fine=[-3,-2,-1,0,1].map(j=>(n0+j+0.5)*fdt);   // mid-frame times: whole frames, exactly one frame apart
-  let maxN=opt.maxN||16; try{ const L=await S.sample.limits(); if(L.images&&L.images.maxCount) maxN=Math.min(maxN,L.images.maxCount); else throw 0; }catch{ throw new Error("images"); }
-  let all=[...coarse.filter(t=>fine.every(f=>Math.abs(f-t)>fdt*0.6)), ...fine].sort((a,b)=>a-b);
-  while(all.length>maxN){ const c=all.findIndex(t=>!fine.includes(t) && t>tc); const i=c>=0? c : all.findIndex(t=>!fine.includes(t)); if(i<0) break; all.splice(i,1); }
-  let times=all.filter(t=>t>=0 && t<=vid.duration-0.01);
-  if(times.length>maxN){ const keep=new Set(); for(let i=0;i<maxN;i++) keep.add(Math.round(i*(times.length-1)/Math.max(1,maxN-1))); times=times.filter((_,i)=>keep.has(i)); }
-  const OW=opt.ow||768, OH=Math.round(OW*ch/cw); const U=1000/OW;   // units per crop pixel
-  const imgs=[]; const cv=document.createElement("canvas"); cv.width=OW; cv.height=OH; const ctx=cv.getContext("2d");
+  prog(0.56,"Loading body tracking…");
+  const pose=await poseModel();
+  // every frame from load through follow-through (capped so phones stay quick)
+  const t0=Math.max(0,tc-0.5*k), t1=Math.min(vid.duration-0.02,tc+0.42*k);
+  let step_=fdt; while((t1-t0)/step_>64) step_+=fdt;
+  const times=[]; for(let t=t0;t<=t1+1e-6;t+=step_) times.push(t);
+  const n0=Math.floor(tc/fdt+1e-6); for(const j of [-3,-2,-1,0,1]){ const t=(n0+j+0.5)*fdt; if(t>=0&&times.every(x=>Math.abs(x-t)>fdt*0.4)) times.push(t); }
+  times.sort((a,b)=>a-b);
+  const OW=640, OH=Math.round(OW*ch/cw), cs=OW/cw;
+  const cv=document.createElement("canvas"); cv.width=OW; cv.height=OH; const ctx=cv.getContext("2d",{willReadFrequently:true});
+  const batLen=(isBB()? 2.75 : 2.7)*ftPx*cs;          // ~33 in bat, in crop pixels
+  const cx=(contact.x*s-sx)*cs, cy=(contact.y*s-sy)*cs;
+  const raw=[], SC=[]; let prevH=null, prevD=null;
   for(let i=0;i<times.length;i++){ checkAbort();
     await seekTo(times[i]); ctx.drawImage(vid,sx,sy,cw,ch,0,0,OW,OH);
-    ctx.lineWidth=1; ctx.font="bold 13px monospace";
-    for(let u=100;u<1000;u+=100){ const x=u/U; ctx.lineWidth=1.5; ctx.strokeStyle="rgba(255,255,255,.7)"; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,OH); ctx.stroke(); ctx.fillStyle="#ff0"; ctx.fillText(String(u),x+2,14); }
-    for(let u=100;u<OH*U;u+=100){ const y=u/U; ctx.lineWidth=1.5; ctx.strokeStyle="rgba(255,255,255,.7)"; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(OW,y); ctx.stroke(); ctx.fillStyle="#ff0"; ctx.fillText(String(u),2,y-3); }
-    const rel=((times[i]-tc)/k); ctx.fillStyle="rgba(0,0,0,.65)"; ctx.fillRect(OW-190,OH-30,190,30); ctx.fillStyle="#fff"; ctx.font="bold 16px sans-serif"; ctx.fillText(`#${i+1}  ${rel>=0?"+":""}${rel.toFixed(Math.abs(rel)<0.05?3:2)} s`,OW-180,OH-9);
-    const jb=await new Promise(r=>cv.toBlob(r,"image/jpeg",opt.q||0.88)); if(!jb||!jb.size) throw {code:"image_rejected",message:"frame grab failed"}; imgs.push(jb);
-    prog(0.55+0.1*(i+1)/times.length,`Preparing frame ${i+1} of ${times.length} for Claude…`);
+    let res; try{ res=pose.detect(cv); }catch{ continue; }
+    const P=(res&&res.landmarks)||[]; if(!P.length) continue;
+    // the batter: the person whose hands are nearest the contact point (catcher/umpire also get found)
+    let who=null, bd=1e9;
+    for(const lm of P){ const lw=lm[15], rw=lm[16]; if(!lw||!rw) continue; const hx=(lw.x+rw.x)/2*OW, hy=(lw.y+rw.y)/2*OH;
+      const d=Math.hypot(hx-cx,hy-cy)+(prevH? 0.7*Math.hypot(hx-prevH.x,hy-prevH.y):0); if(d<bd){bd=d;who={lm,hx,hy};} }
+    if(!who) continue;
+    const {lm,hx,hy}=who; prevH={x:hx,y:hy};
+    const d=ctx.getImageData(0,0,OW,OH).data;
+    const hip={x:(lm[23].x+lm[24].x)/2*OW, y:(lm[23].y+lm[24].y)/2*OH};
+    const near=Math.abs(times[i]-tc)<0.06*k; SC.push(batScores(d,prevD,OW,OH,hx,hy,batLen,hip,near? -Math.sign(pitchDirX||0):0)); prevD=d;
+    raw.push({t:times[i],hx,hy});
+    prog(0.56+0.12*(i+1)/times.length,`Tracking the swing… frame ${i+1} of ${times.length}`);
   }
-  window.__batCrop={sx,sy,cw,ch,OW,OH,times,vw,vh};
-  const prompt=`These ${imgs.length} images are frames from one ${isBB()?"baseball":"fastpitch softball"} swing, in time order. Each image is labeled #N with its time relative to ball contact (0.00 s is contact). Every image has the same yellow grid: x runs 0 to 1000 left to right, y runs 0 down to ${Math.round(OH*U)} top to bottom, with lines every 100 units.
-
-For each image, find the batter's bat and give two points in grid units:
-- "knob": the handle end of the bat (where the hands grip it)
-- "tip": the far end of the barrel
-If the bat isn't visible enough in an image to place a point, use null for that point. Read positions carefully against the grid lines.
-
-Also give "launch": the image number where the hands first start moving forward toward the pitch (the start of the swing), or null if unclear.
-
-Reply with only JSON in this shape:
-{"frames":[{"n":1,"knob":[x,y],"tip":[x,y]}, ...], "launch": 4}`;
-  prog(0.66,"Claude is reading the swing frames…");
-  JOB.ctl=new AbortController();
-  const res=await S.sample.json(prompt,{images:imgs, signal:JOB.ctl.signal, cache:false});
-  const fr=(res&&Array.isArray(res.frames))?res.frames:[];
-  const toProc=(p)=> (Array.isArray(p)&&p.length===2&&isFinite(p[0])&&isFinite(p[1])) ? {x:(sx+(p[0]/U)*(cw/OW))/s, y:(sy+(p[1]/U)*(ch/OH))/s} : null;
-  let keys=[]; fr.forEach(f=>{ const i=(f.n|0)-1; if(i<0||i>=times.length) return; const kn=toProc(f.knob), tp=toProc(f.tip); if(kn&&tp) keys.push({t:times[i],knob:kn,tip:tp}); });
-  // drop implausible bat lengths
-  const lens=keys.map(q=>Math.hypot(q.tip.x-q.knob.x,q.tip.y-q.knob.y)).sort((a,b)=>a-b); const med=lens[lens.length>>1]||0;
-  keys=keys.filter(q=>Math.hypot(q.tip.x-q.knob.x,q.tip.y-q.knob.y)<=med*1.5+2).sort((a,b)=>a.t-b.t);
-  const li=(res&&res.launch|0)-1; const launchT = (li>=0&&li<times.length)? times[li] : null;
+  // smooth bat directions over the whole swing: slow turning before launch, fast through the zone
+  const turn=raw.map((q,i)=>{ if(!i) return 1; const v=Math.hypot(q.hx-raw[i-1].hx,q.hy-raw[i-1].hy)/batLen; return Math.max(0.15,1.2-3*v); });
+  const ang=batViterbi(SC,turn);
+  const toProc=(x,y)=>({x:(sx+x/cs)/s, y:(sy+y/cs)/s});
+  for(let i=0;i<raw.length;i++){ const q=raw[i], r=ang[i]*Math.PI/180; q.knob=toProc(q.hx,q.hy); q.tip=toProc(q.hx+Math.cos(r)*batLen,q.hy+Math.sin(r)*batLen); }
+  // launch = first frame where the hands' forward speed passes 35% of its peak before contact
+  let launchT=null; { const pre=raw.filter(q=>q.t<=tc+fdt);
+    const sp=pre.map((q,i)=> i? Math.hypot(q.knob.x-pre[i-1].knob.x,q.knob.y-pre[i-1].knob.y)/(q.t-pre[i-1].t) : 0);
+    const pk=Math.max(0,...sp); const li=sp.findIndex(v=>v>pk*0.35); if(li>0) launchT=pre[li-1].t; }
+  // drop single-frame flips of the bat direction
+  const keys=raw.filter((q,i)=>{ if(i===0||i===raw.length-1) return true; const a=(p)=>Math.atan2(p.tip.y-p.knob.y,p.tip.x-p.knob.x);
+    const d1=Math.abs(Math.atan2(Math.sin(a(q)-a(raw[i-1])),Math.cos(a(q)-a(raw[i-1])))), d2=Math.abs(Math.atan2(Math.sin(a(q)-a(raw[i+1])),Math.cos(a(q)-a(raw[i+1]))));
+    return !(d1>2.2&&d2>2.2); });
   return {keys, launchT, crop:{sx,sy,cw,ch}};
 }
 
@@ -1815,15 +1856,15 @@ async function analyze(file,opts){
     window.__dbg={costMs,seq:seq.slice(0,8).map(q=>[+q.t.toFixed(4),Math.round(q.x*10)/10,Math.round(q.y*10)/10]),cut,p1:window.__p1,dense:window.__dense,fileFps,scanRate,shaky:frames.filter(f=>f.shaky).length,PW,fdt:fdtUse,nFrames:frames.length,diam,k,scale,pitchPx,hitPx,hvx,hvy,tc,contact,good:goodUse.map(g=>({n:g.pts.length,t0:+g.t0.toFixed(3),t1:+g.t1.toFixed(3),sp:Math.round(g.speed),x0:Math.round(g.pts[0].x),y0:Math.round(g.pts[0].y),x1:Math.round(g.pts[g.pts.length-1].x),y1:Math.round(g.pts[g.pts.length-1].y)})),pitch:pitchPts.map(p=>[+p.t.toFixed(3),Math.round(p.x),Math.round(p.y)]),hit:hitPts.map(p=>[+p.t.toFixed(3),Math.round(p.x),Math.round(p.y)]),nFit};
     step("measure","done");
     // ---- bat path
-    if(opts.useBat && S.sample){ step("bat","on"); prog(0.55,"Picking frames around contact…");
+    if(opts.useBat){ step("bat","on"); prog(0.55,"Picking frames around contact…");
       try{ const bi={tc,k,scale,contact,pitchDirX:pdir[0],fdt:fdtUse,fps:fileFps}; let B;
         // if the images are turned away (too many, too big), try once more with fewer, smaller frames
-        try{ B=await traceBat(bi,vw,vh,PW); } catch(e1){ if(!e1||e1.code!=="image_rejected"||JOB.abort) throw e1; prog(0.6,"Retrying the bat trace with fewer frames…"); B=await traceBat(bi,vw,vh,PW,{maxN:8,ow:640,q:0.8}); }
+        try{ B=await traceBat(bi,vw,vh,PW); } catch(e1){ throw e1; }
         if(B.keys.length>=5){ const tipD=catmull(B.keys.map(q=>({t:q.t,x:q.tip.x,y:q.tip.y})),10), knobD=catmull(B.keys.map(q=>({t:q.t,x:q.knob.x,y:q.knob.y})),10);
           const t0=B.keys[0].t, t1=B.keys[B.keys.length-1].t; const tl=B.launchT && B.launchT<tc ? B.launchT : tc-0.15*k;
           A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.keys,tc,k,scale); step("bat","done"); }
-        else { flags.push("Claude couldn't place the bat in enough frames, so the bat path was skipped."); step("bat","skip"); }
-      }catch(e){ if(JOB.abort) throw e; const code=e&&e.code; flags.push(code==="not_granted"?"Bat tracing was skipped because Claude access wasn't allowed.":code==="rate_limited"?"Bat tracing was skipped: Claude is busy or your usage limit was reached.":e&&e.message==="images"?"Bat tracing isn't available in this view.":"Bat tracing was skipped ("+(code||e.message||"error")+")."); step("bat","skip"); }
+        else { flags.push("Body tracking couldn't place the bat in enough frames, so the bat path was skipped."); step("bat","skip"); }
+      }catch(e){ if(JOB.abort) throw e; const code=e&&e.code; flags.push("Bat tracing was skipped ("+(code||e.message||"error")+"). Check your connection the first time; the body-tracking model downloads once."); step("bat","skip"); }
     } else step("bat","skip");
     checkAbort();
     // ---- render
