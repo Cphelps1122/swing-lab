@@ -1519,7 +1519,7 @@ async function traceBat(info,vw,vh,PW,opt={}){
   let sx=contact.x*s - cw/2 + (pitchDirX>0? 1.5:-1.5)*ftPx; let sy=contact.y*s - 5.5*ftPx;
   sx=Math.max(0,Math.min(vw-cw,sx)); sy=Math.max(0,Math.min(vh-ch,sy));
   prog(0.56,"Loading body tracking…");
-  const pose=await poseModel(); let useModel=true; try{ await batModel(); }catch(e){ useModel=false; }
+  window.__batSource=null; const pose=await poseModel(); let useModel=true; try{ await batModel(); }catch(e){ useModel=false; }
   // every frame from load through follow-through (capped so phones stay quick)
   const t0=Math.max(0,tc-0.5*k), t1=Math.min(vid.duration-0.02,tc+0.42*k);
   let step_=fdt; while((t1-t0)/step_>64) step_+=fdt;
@@ -1654,7 +1654,7 @@ function drawPanel(g,A,W,H,alpha,final){
   g.fillStyle="rgba(8,12,20,.84)"; roundRect(g,x,y,pw,ph,12*U); g.fill(); g.fillStyle="rgb(255,235,60)"; g.fillRect(x,y+14*U,4*U,ph-28*U);
   let cy=y+28*U; const L=(t)=>{ g.font=`600 ${12*U}px "IBM Plex Sans",sans-serif`; g.fillStyle="rgba(190,200,212,1)"; g.fillText(t,x+22*U,cy); };
   L("EXIT VELOCITY"); cy+=46*U; g.font=`700 ${52*U}px "Saira Condensed",sans-serif`; g.fillStyle="rgb(255,235,60)"; const ev=fmt(A.ev); g.fillText(ev,x+20*U,cy); const ew=g.measureText(ev).width; g.font=`500 ${17*U}px "IBM Plex Sans",sans-serif`; g.fillStyle="#fff"; g.fillText("mph",x+28*U+ew,cy);
-  cy+=30*U; L("LAUNCH ANGLE"); cy+=30*U; g.font=`700 ${32*U}px "Saira Condensed",sans-serif`; g.fillStyle="#fff"; const la=(A.la<0?"−":"")+fmt(Math.abs(A.la))+"°"; g.fillText(la,x+20*U,cy); g.font=`500 ${16*U}px "IBM Plex Sans",sans-serif`; g.fillText(A.result.toLowerCase(),x+36*U+g.measureText(la).width*1.6,cy-2*U);
+  cy+=30*U; L("LAUNCH ANGLE"); cy+=30*U; g.font=`700 ${32*U}px "Saira Condensed",sans-serif`; g.fillStyle="#fff"; const la=A.la==null?"—":(A.la<0?"−":"")+fmt(Math.abs(A.la))+"°"; g.fillText(la,x+20*U,cy); g.font=`500 ${16*U}px "IBM Plex Sans",sans-serif`; g.fillText(A.result.toLowerCase(),x+36*U+g.measureText(la).width*1.6,cy-2*U);
   cy+=30*U; g.font=`500 ${15*U}px "IBM Plex Sans",sans-serif`;
   if(A.carry){ g.fillText(`Carry ≈ ${fmt(A.carry)} ft · peak ${fmt(A.apex)} ft`,x+22*U,cy); cy+=24*U; }
   else if(A.bounceFt!=null){ g.fillText(`First bounce ${fmt(A.bounceFt)} ft out`,x+22*U,cy); cy+=24*U; }
@@ -1857,22 +1857,38 @@ async function analyze(file,opts){
       if(p2 && (p2.pitch || !pair.pitch)){ pairUse=p2; const lastT=w1-0.02*kGuess; goodUse=r2.good.concat(good.filter(g=>g.t0>=lastT)); fdtUse=r2.fdt; }
       window.__dense={n:dense.length,expected:Math.round((w1-w0)*fileFps),w0,w1,good:r2.good.length,...window.__rate2};
     }
-    if(!pairUse.hit) throw new Error(`Found the pitch at ${mmss(pairUse.t)}, but no batted ball after it. If the hitter took the pitch, missed, or fouled it straight back, there's no exit velo to measure. If the ball was put in play, film in Slo-Mo (120 or 240 fps) and keep more of the field in front of the hitter in the shot; this clip is about ${Math.round(fileFps)} fps.`);
-    const chain=chainAfter(pairUse.hit,goodUse,PW,fdtUse);
+    const noHit=!pairUse.hit; if(noHit && !pairUse.pitch) throw new Error(`Found the pitch at ${mmss(pairUse.t)}, but no batted ball after it. If the hitter took the pitch, missed, or fouled it straight back, there's no exit velo to measure. If the ball was put in play, film in Slo-Mo (120 or 240 fps) and keep more of the field in front of the hitter in the shot; this clip is about ${Math.round(fileFps)} fps.`);
+    const chain=noHit? [] : chainAfter(pairUse.hit,goodUse,PW,fdtUse);
     const hitPts=chain.flatMap(c=>c.pts.map(p=>({...p})));
     const pitchPts=pairUse.pitch?pairUse.pitch.pts:[];
     // contact time/point
     let tc, contact;
     if(pairUse.pitch){ const pe=pitchPts[pitchPts.length-1]; tc=pe.t; contact={x:pe.x,y:pe.y};
     } else { tc=pairUse.hit.pts[0].t-fdtUse/2; contact={x:pairUse.hit.pts[0].x,y:pairUse.hit.pts[0].y}; flags.push("The pitch wasn't tracked, so contact is approximate."); }
+    if(noHit && pairUse.pitch){ // no batted ball: carry the pitch on to the hitter's hands so contact, the zoom and the bat trace land on her
+      try{ prog(0.45,"Finding the hitter…"); const P0=pitchPts, pe=P0[P0.length-1], pq=P0[Math.max(0,P0.length-4)];
+        const vx=(pe.x-pq.x)/((pe.t-pq.t)||1), vy=(pe.y-pq.y)/((pe.t-pq.t)||1), sp=Math.hypot(vx,vy)||1, ux=vx/sp, uy=vy/sp;
+        const pose=await poseModel(); let best=null;
+        for(const dt of [0.15,0.3,0.45].map(x=>x*Math.max(1,fileFps>=90?1:1))){ await seekTo(Math.min(dur-0.05,pe.t+dt));
+          // look in a box just ahead of where the pitch was last seen (people are small in wide shots)
+          const f=vw/PW, bw=0.55*PW, bh=0.55*PW, bx=Math.max(0,Math.min(PW-bw, ux>0? pe.x-0.05*PW : pe.x-bw+0.05*PW)), by=Math.max(0,Math.min(vh/f-bh, pe.y-0.6*bh));
+          const c=document.createElement("canvas"); c.width=640; c.height=640; c.getContext("2d").drawImage(vid,bx*f,by*f,bw*f,bh*f,0,0,640,640);
+          const res=pose.detect(await createImageBitmap(c));
+          for(const lm of (res.landmarks||[])){ const hx=bx+(lm[15].x+lm[16].x)/2*bw, hy=by+(lm[15].y+lm[16].y)/2*bh;
+            const along=(hx-pe.x)*ux+(hy-pe.y)*uy, off=Math.abs(-(hx-pe.x)*uy+(hy-pe.y)*ux); if(along<0) continue;
+            // the hitter is the first standing person the pitch reaches (the catcher squats behind her)
+            const hip=(lm[23].y+lm[24].y)/2, knee=(lm[25].y+lm[26].y)/2, ank=(lm[27].y+lm[28].y)/2; const squat=(knee-hip)<0.35*(ank-hip);
+            if(off>0.18*PW || squat) continue; const sc=along+0.5*off; if(!best||sc<best.sc) best={sc,hx,hy,along,lm}; } if(best) break; }
+        window.__hitter=best&&{hx:best.hx,hy:best.hy,along:best.along}; if(best){ const along=Math.max(0,best.along-0.02*PW); tc=pe.t+along/sp; contact={x:pe.x+ux*along, y:pe.y+uy*along+0.0*PW}; }
+      }catch(e){ console.warn("find hitter",e); } }
     step("ball","done"); step("measure","on"); prog(0.46,"Measuring the ball's size…");
     // velocities in proc px per file-second
     // ball sightings between the end of the pitch and the start of the tracked hit belong to the hit
-    const hit0=pairUse.hit.pts[0]; const pre=[];
+    const hit0=noHit? {t:tc,x:contact.x,y:contact.y} : pairUse.hit.pts[0]; const pre=[];
     for(const f of (window.__denseFrames||[])){ if(f.t<=tc+1e-6 || f.t>=hit0.t-1e-6) continue;
       const bx0=Math.min(contact.x,hit0.x)-12, bx1=Math.max(contact.x,hit0.x)+12, by0=Math.min(contact.y,hit0.y)-12, by1=Math.max(contact.y,hit0.y)+12;
       const c=f.blobs.filter(b=>b.x>=bx0&&b.x<=bx1&&b.y>=by0&&b.y<=by1).sort((a,b)=>a.a-b.a).pop(); if(c) pre.push({t:f.t,x:c.x,y:c.y,a:c.a}); }
-    const seq0=[{t:tc,x:contact.x,y:contact.y}, ...pre, ...pairUse.hit.pts]; const seq=[];
+    const seq0=[{t:tc,x:contact.x,y:contact.y}, ...pre, ...(noHit?[]:pairUse.hit.pts)]; const seq=[];
     for(const q of seq0){ const L=seq[seq.length-1]; if(L && (q.t<=L.t+1e-6 || Math.hypot(q.x-L.x,q.y-L.y)<0.6)) continue; seq.push(q); }
     hitPts.unshift(...pre);
     // bounce = lowest point on screen right after a downward start
@@ -1889,7 +1905,7 @@ async function analyze(file,opts){
       for(let i=1;i<seq.length-1 && i<4*maxN0+3;i++){ const ri=(seq[i+1].y-seq[i].y)/((seq[i+1].t-seq[i].t)||1); if(ri<0.35*r0){ cut=i+1; if(seq[i+1].y < seq[i].y-0.5) cut=i+1; break; } } }
     const fitHit=(kk)=>{ const mN=Math.max(3, Math.round(0.05*kk/fdtUse)+1); const hs=seq.slice(0, Math.max(2, Math.min(cut, mN)));
       const fx=polyfit(hs.map(p=>p.t),hs.map(p=>p.x),1), fy=polyfit(hs.map(p=>p.t),hs.map(p=>p.y),1); return {hvx:fx.c[0],hvy:fy.c[0],n:hs.length}; };
-    let {hvx,hvy,n:nFit}=fitHit(1); let hitPx=Math.hypot(hvx,hvy);
+    let {hvx,hvy,n:nFit}= noHit? {hvx:0,hvy:0,n:0} : fitHit(1); let hitPx=Math.hypot(hvx,hvy);
     if(gapFrames>1.6 && pitchPts.length>=2){ // contact where the pitch path and the hit path meet
       const pe=pitchPts[pitchPts.length-1], pq=pitchPts[Math.max(0,pitchPts.length-3)]; const pvx=(pe.x-pq.x)/((pe.t-pq.t)||1), pvy=(pe.y-pq.y)/((pe.t-pq.t)||1); const h0=seq[0];
       let best=null; for(let i=0;i<=40;i++){ const tt=pe.t+(h0.t-pe.t)*i/40; const ax=pe.x+pvx*(tt-pe.t), ay=pe.y+pvy*(tt-pe.t), bx=h0.x+hvx*(tt-h0.t), by=h0.y+hvy*(tt-h0.t); const d=Math.hypot(ax-bx,ay-by); if(!best||d<best.d) best={d,tt,x:(ax+bx)/2,y:(ay+by)/2}; }
@@ -1899,7 +1915,7 @@ async function analyze(file,opts){
     if(pitchPts.length>=3){ const ps=pitchPts.slice(-Math.min(pitchPts.length, Math.max(3,Math.round(0.1*kG/fdtUse)+1))); const px_=polyfit(ps.map(p=>p.t),ps.map(p=>p.x),1), py_=polyfit(ps.map(p=>p.t),ps.map(p=>p.y),1); pitchPx=Math.hypot(px_.c[0],py_.c[0]); pdir=[px_.c[0]/pitchPx, py_.c[0]/pitchPx]; }
     // ball size at native res
     let diam=null; const sample=(pitchPts.length?pitchPts.slice(-6):pairUse.hit.pts.slice(0,4));
-    try{ diam=await measureBallDiam(sample,vw,PW, pitchPts.length?pdir:[hvx/hitPx,hvy/hitPx]); }catch{}
+    try{ diam=await measureBallDiam(sample,vw,PW, pitchPts.length?pdir:[hvx/(hitPx||1),hvy/(hitPx||1)]); }catch{}
     let scale = diam? diam/BALL_FT : null;   // proc px per ft
     // slow-motion factor
     let k = opts.fps==="auto"? null : Number(opts.fps);
@@ -1914,18 +1930,19 @@ async function analyze(file,opts){
     if(known && pitchPx){ scale = pitchPx*k/(known/MPH); scaleSource="scale from known pitch speed"; }
     else if(!scale && pitchPx){ scale=pitchPx*k/(SPC.pitchTyp/MPH); scaleSource=`scale assumed from a typical ${SPC.pitchTyp} mph pitch`; flags.push("The ball was too small to measure, so speeds assume a typical pitch speed. Enter the real pitch speed for better numbers."); }
     else if(!scale){ scale=PW/40; scaleSource="rough scale"; flags.push("Couldn't set the scale from this clip; numbers are rough."); }
-    if(k>1){ ({hvx,hvy,n:nFit}=fitHit(k)); hitPx=Math.hypot(hvx,hvy); }
+    if(k>1 && !noHit){ ({hvx,hvy,n:nFit}=fitHit(k)); hitPx=Math.hypot(hvx,hvy); }
     let pitchMph = pitchPx? pitchPx*k/scale*MPH : null;
     if(!known && pitchMph && (pitchMph<SPC.pitchLo||pitchMph>SPC.pitchHi)){ flags.push(`The pitch read ${pitchMph.toFixed(0)} mph, outside the usual range, so the scale may be off. Entering the real pitch speed will fix it.`); }
     const ev = hitPx*k/scale*MPH; const la=Math.atan2(-hvy,Math.abs(hvx))*180/Math.PI;
-    if(!opts._retry && ((!known && pitchMph && (pitchMph<SPC.pitchLo-3||pitchMph>SPC.pitchHi+5)) || !(ev>12 && ev<SPC.evMax-15))){ const e=new Error("implausible"); e.retry=true; throw e; }
-    if(!known && (ev>SPC.evMax || (pitchMph && pitchMph>1.6*SPC.pitchHi))) throw new Error(`The numbers from this clip aren't believable (${Math.round(ev)} mph off the bat), so it wasn't saved. The ball was probably too small or blurry to follow, or something else was tracked. Film from the side in Slo-Mo (120 or 240 fps), with nothing like a net between the camera and the hitter.`);
+    if(!noHit && !opts._retry && ((!known && pitchMph && (pitchMph<SPC.pitchLo-3||pitchMph>SPC.pitchHi+5)) || !(ev>12 && ev<SPC.evMax-15))){ const e=new Error("implausible"); e.retry=true; throw e; }
+    if(!noHit && !known && (ev>SPC.evMax || (pitchMph && pitchMph>1.6*SPC.pitchHi))) throw new Error(`The numbers from this clip aren't believable (${Math.round(ev)} mph off the bat), so it wasn't saved. The ball was probably too small or blurry to follow, or something else was tracked. Film from the side in Slo-Mo (120 or 240 fps), with nothing like a net between the camera and the hitter.`);
     // bounce: first point where vertical motion turns from down to up
     let bounce=null, bounceFt=null;
     if(la<5){ for(let i=1;i<hitPts.length-1;i++){ if(hitPts[i].y>hitPts[i-1].y && hitPts[i].y>=hitPts[i+1].y && hitPts[i].t>tc){ bounce=hitPts[i]; break; } } if(bounce) bounceFt=Math.hypot(bounce.x-contact.x,bounce.y-contact.y)/scale; }
     const result=resultOf(la);
     let carry=null, apex=null, hang=null; if(la>=5){ const fl=flight(ev,la,2.8); carry=fl.dist; apex=fl.apex; hang=fl.hang; }
     const A={tc,k,contact,hitPts,pitchPts,ev,la,result,carry,apex,hang,pitch:pitchMph,bounce,bounceFt,scale,scaleSource,fdt:fdtUse,flags};
+    if(noHit){ A.ev=null; A.la=null; A.result="No batted ball"; A.hitPts=[]; A.bounce=null; A.bounceFt=null; A.carry=null; A.noHit=true; flags.push("No batted ball was seen after this pitch (a miss, a foul tip, or a ball straight into the dirt), so there\u2019s no exit velo. Bat path and bat speed are still measured."); }
     window.__dbg={costMs,seq:seq.slice(0,8).map(q=>[+q.t.toFixed(4),Math.round(q.x*10)/10,Math.round(q.y*10)/10]),cut,p1:window.__p1,dense:window.__dense,fileFps,scanRate,shaky:frames.filter(f=>f.shaky).length,PW,fdt:fdtUse,nFrames:frames.length,diam,k,scale,pitchPx,hitPx,hvx,hvy,tc,contact,good:goodUse.map(g=>({n:g.pts.length,t0:+g.t0.toFixed(3),t1:+g.t1.toFixed(3),sp:Math.round(g.speed),x0:Math.round(g.pts[0].x),y0:Math.round(g.pts[0].y),x1:Math.round(g.pts[g.pts.length-1].x),y1:Math.round(g.pts[g.pts.length-1].y)})),pitch:pitchPts.map(p=>[+p.t.toFixed(3),Math.round(p.x),Math.round(p.y)]),hit:hitPts.map(p=>[+p.t.toFixed(3),Math.round(p.x),Math.round(p.y)]),nFit};
     step("measure","done");
     // ---- bat path
@@ -1935,7 +1952,7 @@ async function analyze(file,opts){
         try{ B=await traceBat(bi,vw,vh,PW); } catch(e1){ throw e1; }
         if(B.keys.length>=5){ const tipD=catmull(B.keys.map(q=>({t:q.t,x:q.tip.x,y:q.tip.y})),10), knobD=catmull(B.keys.map(q=>({t:q.t,x:q.knob.x,y:q.knob.y})),10);
           const t0=B.keys[0].t, t1=B.keys[B.keys.length-1].t; const tl=B.launchT && B.launchT<tc ? B.launchT : tc-0.15*k;
-          A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.allKeys||B.keys,tc,k,scale); window.__rawBat=A.batSpeed; if(!(A.batSpeed>15&&A.batSpeed<(isBB()?95:85))){ flags.push("Bat speed couldn\u2019t be read reliably on this clip, so it was left out."); A.batSpeed=null; } if(!(A.l2c>0.08&&A.l2c<0.4)){ A.l2c=null; } step("bat","done"); }
+          A.bat={keys:B.keys,tip:tipD,knob:knobD,t0,t1,tl,tc,crop:B.crop}; A.l2c=(tc-tl)/k; A.batSpeed=batSpeedOf(B.allKeys||B.keys,tc,k,scale); window.__rawBat=A.batSpeed; if(!(A.batSpeed>15&&A.batSpeed<(isBB()?95:85))){ flags.push("Bat speed couldn\u2019t be read reliably on this clip, so it was left out."); A.batSpeed=null; if(window.__batSource==="estimate"){ A.bat=null; flags.push("The bat couldn\u2019t be followed clearly on this clip, so the bat path was left off."); } } if(!(A.l2c>0.08&&A.l2c<0.4)){ A.l2c=null; } step("bat","done"); }
         else { flags.push("Body tracking couldn't place the bat in enough frames, so the bat path was skipped."); step("bat","skip"); }
       }catch(e){ if(JOB.abort) throw e; const code=e&&e.code; flags.push("Bat tracing was skipped ("+(code||e.message||"error")+"). Check your connection the first time; the body-tracking model downloads once."); step("bat","skip"); }
     } else step("bat","skip");
@@ -1943,14 +1960,14 @@ async function analyze(file,opts){
     if(window.SLPhys){ try{
       const fused=SLPhys.fuseScale(SPC, scaleSource==="scale from ball size"? scale:null, diam, A.bat? window.__batLenPx : null);
       if(fused && !known && Math.abs(fused.scale/scale-1)>0.005){ const r=scale/fused.scale; scale=fused.scale; A.scale=scale;
-        A.ev*=r; if(A.pitch) A.pitch*=r; if(A.batSpeed) A.batSpeed*=r; if(A.bounceFt!=null) A.bounceFt*=r;
+        if(A.ev!=null) A.ev*=r; if(A.pitch) A.pitch*=r; if(A.batSpeed) A.batSpeed*=r; if(A.bounceFt!=null) A.bounceFt*=r;
         A.scaleSource=fused.parts.length>1? "scale from ball size + bat length" : A.scaleSource; }
       const wx=await Promise.race([wxP,new Promise(r=>setTimeout(()=>r(null),6000))]);
       if(wx){ let tail=0; if(homeF&&Number.isFinite(homeF.cfBearing)){ const to=(wx.windFrom+180)%360; tail=wx.windMph*Math.cos((to-homeF.cfBearing)*Math.PI/180); }
         A.wx={tempF:Math.round(wx.tempF),rh:Math.round(wx.rh),windMph:Math.round(wx.windMph),windFrom:Math.round(wx.windFrom),tailMph:Math.round(tail*10)/10,rho:+wx.rho.toFixed(3),where:wx.where}; }
-      if(A.la>=5){ const fl=SLPhys.flight(SPC,A.ev,A.la,2.8,A.wx? {rho:A.wx.rho,tailMph:A.wx.tailMph}:null); A.carry=fl.dist; A.apex=fl.apex; A.hang=fl.hang; A.spinEst=fl.rpm; }
+      if(A.la!=null && A.la>=5){ const fl=SLPhys.flight(SPC,A.ev,A.la,2.8,A.wx? {rho:A.wx.rho,tailMph:A.wx.tailMph}:null); A.carry=fl.dist; A.apex=fl.apex; A.hang=fl.hang; A.spinEst=fl.rpm; }
       if(A.pitch){ A.pitchRel=SLPhys.releaseSpeed(SPC,A.pitch,A.wx,Math.max(10,(SPC.dist||43)-(SPC.ext||4)-3)); }
-      if(A.batSpeed && A.pitch){ const mx=SLPhys.maxExit(SPC,A.pitch,A.batSpeed); if(A.ev>mx+4) flags.push(`Exit velo (${Math.round(A.ev)}) is more than this bat speed and pitch can produce (about ${Math.round(mx)} max), so one of the readings is off.`); }
+      if(A.batSpeed && A.pitch && A.ev!=null){ const mx=SLPhys.maxExit(SPC,A.pitch,A.batSpeed); if(A.ev>mx+4) flags.push(`Exit velo (${Math.round(A.ev)}) is more than this bat speed and pitch can produce (about ${Math.round(mx)} max), so one of the readings is off.`); }
       window.__phys={fused,wx:A.wx,ev:A.ev,pitchRel:A.pitchRel,carry:A.carry};
     }catch(e){ console.warn("physics",e); } }
     checkAbort();
@@ -1970,7 +1987,7 @@ async function analyzeAndSave(file,batter,note,sessionId,opts){
   const rec={ sport:SPORT, batter, note, sessionId:sessionId||null, createdAt:new Date().toISOString(), by:S.myId||null, source:"phone", clip:file.name.slice(0,120),
     pitchRel:A.pitchRel?round(A.pitchRel,1):null, wx:A.wx||null, spinEst:A.spinEst||null, ev:round(A.ev,1), la:round(A.la,1), result:A.result, carry:A.carry?round(A.carry,0):null, apex:A.apex?round(A.apex,1):null, hang:A.hang?round(A.hang,2):null,
     bounceFt:A.bounceFt!=null?round(A.bounceFt,1):null, pitch:A.pitch?round(A.pitch,1):null, l2c:A.l2c?round(A.l2c,3):null, batSpeed:A.batSpeed?round(A.batSpeed,1):null,
-    evRange:`${Math.round(A.ev*0.9)}–${Math.round(A.ev*1.1)} mph`, scaleSource:A.scaleSource, slowFactor:A.k, flags:A.flags, mime:out.mime, batPath:!!A.bat };
+    evRange:A.ev!=null?`${Math.round(A.ev*0.9)}–${Math.round(A.ev*1.1)} mph`:null, scaleSource:A.scaleSource, slowFactor:A.k, flags:A.flags, mime:out.mime, batPath:!!A.bat };
   let saved=false, saveMsg="";
   step("save","on"); prog(0.95,"Saving to the library…");
   if(S.db && S.assets){
@@ -2026,7 +2043,7 @@ function showBatch(results,total,done){
     p.append(row); $("#workPanel").hidden=true;
   }
 }
-const round=(v,d)=>Math.round(v*10**d)/10**d;
+const round=(v,d)=>(v==null||!isFinite(v))? null : Math.round(v*10**d)/10**d;
 function showResult(rec,out,saved,saveMsg){
   const p=$("#resultPanel"); p.replaceChildren();
   const v=document.createElement("video"); v.className="player"; v.controls=true; v.playsInline=true; v.src=URL.createObjectURL(out.blob); v.autoplay=true; v.muted=true; v.loop=true;
