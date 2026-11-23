@@ -1124,7 +1124,18 @@ function renderClips(){
   else CLIPS.forEach(c=>c.input=null);
   $("#analyzeBtn").disabled=!n; $("#analyzeBtn").textContent= n>1? `Analyze ${n} swings` : "Analyze swing";
 }
-for (const id of ["#recInput","#pickInput"]) $(id).addEventListener("change",async(e)=>{ const fl=[...(e.target.files||[])]; e.target.value=""; if(fl.length) await addFiles(fl); });
+const READY=(()=>{ const d=document.createElement("div"); d.id="readyNote"; d.hidden=true; d.setAttribute("role","status");
+  d.style.cssText="position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));z-index:90;background:var(--ink);color:var(--bg);padding:12px 16px;border-radius:12px;font-weight:600;max-width:90vw;text-align:center;box-shadow:0 6px 24px rgba(0,0,0,.3)";
+  d.textContent="Getting your video ready… long or 4K clips can take a minute. Trimming to a few seconds around the swing is fastest.";
+  document.body.append(d); let tm=null; return { show(){ d.hidden=false; clearTimeout(tm); tm=setTimeout(()=>d.hidden=true,120000); }, hide(){ d.hidden=true; clearTimeout(tm); } }; })();
+for (const id of ["#recInput","#pickInput","#pPickInput","#pRecInput"]) { const inp=$(id); if(!inp) continue;
+  inp.addEventListener("click",()=>READY.show());
+  inp.addEventListener("cancel",()=>READY.hide()); inp.addEventListener("change",()=>READY.hide()); }
+function toastMsg(msg){ const d=$("#readyNote"); d.textContent=msg; d.hidden=false; setTimeout(()=>{ d.hidden=true; d.textContent="Getting your video ready… long or 4K clips can take a minute. Trimming to a few seconds around the swing is fastest."; },7000); }
+for (const id of ["#recInput","#pickInput"]) $(id).addEventListener("change",async(e)=>{ READY.hide(); const fl=[...(e.target.files||[])]; e.target.value="";
+  const long=[]; for(const f of fl){ try{ const v=document.createElement("video"); v.preload="metadata"; v.src=URL.createObjectURL(f); await new Promise(r=>{ v.onloadedmetadata=r; v.onerror=r; setTimeout(r,4000); }); if(v.duration>20) long.push(Math.round(v.duration)); URL.revokeObjectURL(v.src); }catch{} }
+  if(long.length) toastMsg(`That clip is ${long[0]} seconds long. Swing Lab will find each pitch and let you pick the swing; it only keeps a few seconds around it.`);
+  if(fl.length) await addFiles(fl); });
 function resetAdd(){ setTab(false); $("#phoneForm").hidden=false; $("#workPanel").hidden=true; $("#resultPanel").hidden=true; $("#resultPanel").replaceChildren(); CLIPS=[]; renderClips(); for(const id of ["#recInput","#pickInput","#impFiles"]) $(id).value=""; IMP=[]; impUpd(); }
 
 /* ------------------------------------------------------------------ progress */
@@ -1362,9 +1373,13 @@ function findEvents(good,PW,fdt){
   ev.sort((a,b)=>b.score-a.score);
   let out=[]; for(const e of ev){ if(!out.some(o=>Math.abs(o.t-e.t)<0.45)) out.push(e); }
   // every pitch in one clip comes from the same side; drop "pitches" going the other way, and stray specks when real pitches exist
+  // a ball moving with no pitch just before it is a throw back to the pitcher, an overthrow, or a warm-up toss, not a batted ball
+  if(out.some(e=>e.pitch)){ out=out.filter(e=>e.pitch || good.some(g=>g!==e.hit && pitchLike(g,PW) && g.t1<=e.t+0.05 && g.t1>=e.t-1.0)); }
   const best=out[0], lead=out.find(e=>e.pitch);
-  if(best) out=out.filter(e=>e.score>=0.25*best.score);
+  if(best) out=out.filter(e=>e.score>=0.25*best.score || (e.pitch && e.pitch.pts.length>=4 && e.score>=0.1*best.score));
   if(lead){ const d0=dirOf(lead.pitch,true); out=out.filter(e=>!e.pitch || (()=>{ const d=dirOf(e.pitch,true); return d[0]*d0[0]+d[1]*d0[1]>0.5; })()); }
+  // whole at-bats: if no batted ball was seen, the last pitch is the one that ended the at-bat, so suggest it first
+  if(out.length>1 && !out.some(e=>e.hit)){ const last=out.reduce((a,b)=>b.t>a.t?b:a); out=[last,...out.filter(e=>e!==last)]; }
   return out;
 }
 function pickPitchAndHit(good,PW,fdt){
