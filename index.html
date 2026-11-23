@@ -1129,7 +1129,7 @@ function resetAdd(){ setTab(false); $("#phoneForm").hidden=false; $("#workPanel"
 /* ------------------------------------------------------------------ progress */
 const JOB={running:false, abort:false};
 function step(k,state){ const li=document.querySelector(`#steps li[data-k="${k}"]`); if(!li) return; li.classList.remove("on","done","skip"); if(state) li.classList.add(state); }
-function prog(frac,text){ $("#progBar").style.width=Math.round(Math.max(0,Math.min(1,frac))*100)+"%"; if(text) $("#progText").textContent=text; }
+function prog(frac,text){ $("#progBar").style.width=Math.round(Math.max(0,Math.min(1,frac))*100)+"%"; if(text) $("#progText").textContent=text; if(text&&window.__plog) console.log("PROG "+((performance.now()/1000)|0)+"s "+text); }
 function checkAbort(){ if(JOB.abort) throw new Error("Stopped."); }
 $("#cancelBtn").onclick=()=>{ JOB.abort=true; prog(0,"Stopping…"); };
 
@@ -1551,6 +1551,7 @@ async function traceBat(info,vw,vh,PW,opt={}){
     const KX=sm2(fill(m=>m.knob.x)),KY=sm2(fill(m=>m.knob.y)),TX=sm2(fill(m=>m.tip.x)),TY=sm2(fill(m=>m.tip.y));
     for(let i=0;i<raw.length;i++){ const q=raw[i]; q.hx=KX[i]; q.hy=KY[i]; q.knob=toProc(KX[i],KY[i]); q.tip=toProc(TX[i],TY[i]); }
     window.__batSource="model ("+hit+"/"+raw.length+" frames)";
+    { const L=raw.map(q=>Math.hypot(q.tip.x-q.knob.x,q.tip.y-q.knob.y)).sort((a,b)=>b-a); window.__batLenPx=L[Math.min(2,L.length-1)]; }
   } else window.__batSource="estimate";
   // launch = first frame where the hands' forward speed passes 35% of its peak before contact
   let launchT=null; { const pre=raw.filter(q=>q.t<=tc+fdt);
@@ -1827,7 +1828,7 @@ async function analyze(file,opts){
       if(p2 && (p2.pitch || !pair.pitch)){ pairUse=p2; const lastT=w1-0.02*kGuess; goodUse=r2.good.concat(good.filter(g=>g.t0>=lastT)); fdtUse=r2.fdt; }
       window.__dense={n:dense.length,expected:Math.round((w1-w0)*fileFps),w0,w1,good:r2.good.length,...window.__rate2};
     }
-    if(!pairUse.hit) throw new Error(`Found the pitch at ${mmss(pairUse.t)}, but not enough of the ball after contact to measure it. At 30 fps a hard-hit ball is only on screen for a frame or two; film in Slo-Mo (120 or 240 fps) and keep more of the field in front of the hitter in the shot.`);
+    if(!pairUse.hit) throw new Error(`Found the pitch at ${mmss(pairUse.t)}, but no batted ball after it. If the hitter took the pitch, missed, or fouled it straight back, there's no exit velo to measure. If the ball was put in play, film in Slo-Mo (120 or 240 fps) and keep more of the field in front of the hitter in the shot; this clip is about ${Math.round(fileFps)} fps.`);
     const chain=chainAfter(pairUse.hit,goodUse,PW,fdtUse);
     const hitPts=chain.flatMap(c=>c.pts.map(p=>({...p})));
     const pitchPts=pairUse.pitch?pairUse.pitch.pts:[];
