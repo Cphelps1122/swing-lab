@@ -6,6 +6,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script src="js/store.js"></script>
+<script src="js/physics.js"></script>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600&family=Saira+Condensed:wght@600;700&display=swap">
@@ -822,7 +823,7 @@ $("#expGo").onclick=async()=>{
         for(const ln of doc.wrap([fmtDate(s.createdAt), sessTitle(sessById(s.sessionId))].join(" · "),w,9.5)){ doc.text(ln,x,yy,{size:9.5,color:[90,90,90]}); yy+=12; } yy+=12;
         doc.text("EXIT VELOCITY",x,yy,{size:7.5,color:[110,110,110]}); yy+=28;
         const evs=fmt(s.ev); doc.text(evs,x,yy,{size:30,bold:true}); doc.text("mph",x+doc.width(evs,30,true)+5,yy,{size:11}); yy+=24;
-        const lines=[`Launch angle ${laTxt(s.la)} · ${s.result||""}`, s.carry? `Projected carry ~${fmt(s.carry)} ft · peak ${fmt(s.apex)} ft` : s.bounceFt!=null? `First bounce ${fmt(s.bounceFt)} ft past contact` : "", s.batSpeed? `Bat speed ${fmt(s.batSpeed)} mph at contact` : "", s.pitch? `Pitch ${fmt(s.pitch)} mph` : "", s.l2c? `Hands to contact ${fmt(s.l2c,2)} s` : "", (s.outcome||s.spray)? `Result: ${[s.outcome, sprayText(s.spray)].filter(Boolean).join(" · ")}` : "", s.evRange? `Likely exit velocity range ${s.evRange}` : "", s.note? `Note: ${s.note}` : ""].filter(Boolean);
+        const lines=[`Launch angle ${laTxt(s.la)} · ${s.result||""}`, s.carry? `Projected carry ~${fmt(s.carry)} ft · peak ${fmt(s.apex)} ft` : s.bounceFt!=null? `First bounce ${fmt(s.bounceFt)} ft past contact` : "", s.batSpeed? `Bat speed ${fmt(s.batSpeed)} mph at contact` : "", s.pitch? `Pitch ${fmt(s.pitchRel||s.pitch)} mph${s.pitchRel?` out of the hand (${fmt(s.pitch)} at the plate)`:""}` : "", s.wx? `${s.wx.tempF}°F, ${s.wx.rh}% humidity, wind ${s.wx.windMph} mph` : "", s.l2c? `Hands to contact ${fmt(s.l2c,2)} s` : "", (s.outcome||s.spray)? `Result: ${[s.outcome, sprayText(s.spray)].filter(Boolean).join(" · ")}` : "", s.evRange? `Likely exit velocity range ${s.evRange}` : "", s.note? `Note: ${s.note}` : ""].filter(Boolean);
         for(const L of lines){ for(const ln of doc.wrap(L,w,10.5)){ if(yy>top+350) break; doc.text(ln,x,yy,{size:10.5}); yy+=14.5; } }
         if(i%2===0 && i+1<list.length) doc.line(M,396,PWd-M,396,[215,215,215]);
       }
@@ -1634,7 +1635,7 @@ function marker(g,x,y,text,U,W,H,dir){ g.save(); g.strokeStyle="#fff"; g.lineWid
 function roundRect(g,x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r); g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
 function drawPanel(g,A,W,H,alpha,final){
   if(alpha<=0) return; const U=H/720; g.save(); g.globalAlpha=alpha;
-  const pw=330*U, ph=((A.carry?226:200)+(final?24:0)+(A.batSpeed?22:0))*U, x=W-pw-18*U, y=H-ph-18*U;
+  const pw=330*U, ph=((A.carry?226:200)+(final?24:0)+(A.batSpeed?22:0)+(A.wx?18:0))*U, x=W-pw-18*U, y=H-ph-18*U;
   g.fillStyle="rgba(8,12,20,.84)"; roundRect(g,x,y,pw,ph,12*U); g.fill(); g.fillStyle="rgb(255,235,60)"; g.fillRect(x,y+14*U,4*U,ph-28*U);
   let cy=y+28*U; const L=(t)=>{ g.font=`600 ${12*U}px "IBM Plex Sans",sans-serif`; g.fillStyle="rgba(190,200,212,1)"; g.fillText(t,x+22*U,cy); };
   L("EXIT VELOCITY"); cy+=46*U; g.font=`700 ${52*U}px "Saira Condensed",sans-serif`; g.fillStyle="rgb(255,235,60)"; const ev=fmt(A.ev); g.fillText(ev,x+20*U,cy); const ew=g.measureText(ev).width; g.font=`500 ${17*U}px "IBM Plex Sans",sans-serif`; g.fillStyle="#fff"; g.fillText("mph",x+28*U+ew,cy);
@@ -1643,7 +1644,8 @@ function drawPanel(g,A,W,H,alpha,final){
   if(A.carry){ g.fillText(`Carry ≈ ${fmt(A.carry)} ft · peak ${fmt(A.apex)} ft`,x+22*U,cy); cy+=24*U; }
   else if(A.bounceFt!=null){ g.fillText(`First bounce ${fmt(A.bounceFt)} ft out`,x+22*U,cy); cy+=24*U; }
   if(A.batSpeed){ g.fillStyle="#fff"; g.fillText(`Bat speed ${fmt(A.batSpeed)} mph`,x+22*U,cy); cy+=22*U; }
-  if(A.pitch){ g.fillStyle="rgba(190,200,212,1)"; g.fillText(`Pitch ${fmt(A.pitch)} mph${A.l2c?` · hands→contact ${fmt(A.l2c,2)} s`:""}`,x+22*U,cy); cy+=22*U; }
+  if(A.pitch){ g.fillStyle="rgba(190,200,212,1)"; g.fillText(`Pitch ${fmt(A.pitchRel||A.pitch)} mph${A.l2c?` · hands→contact ${fmt(A.l2c,2)} s`:""}`,x+22*U,cy); cy+=22*U; }
+  if(A.wx){ g.font=`400 ${12*U}px "IBM Plex Sans",sans-serif`; g.fillStyle="rgba(170,180,195,1)"; g.fillText(`${A.wx.tempF}°F · ${A.wx.rh}% humidity · wind ${A.wx.windMph} mph${A.wx.tailMph?` (${A.wx.tailMph>0?"out":"in"} ${Math.abs(A.wx.tailMph)})`:""}`,x+22*U,cy); cy+=18*U; }
   if(final){ g.font=`400 ${12*U}px "IBM Plex Sans",sans-serif`; g.fillStyle="rgba(170,180,195,1)"; g.fillText("Estimates from video",x+22*U,cy+4*U); }
   g.restore();
 }
@@ -1751,6 +1753,8 @@ async function analyze(file,opts){
   try{
     step("read","on"); prog(0.01,"Opening the clip…");
     await loadVideo(file); const vw=vid.videoWidth, vh=vid.videoHeight, dur=vid.duration;
+    const homeF=(()=>{ try{ return JSON.parse(localStorage.getItem("sl_home")||"null"); }catch{ return null; } })();
+    const wxP=(window.SLPhys? SLPhys.clipInfo(file).then(i=>SLPhys.weather(i,homeF)) : Promise.resolve(null)).catch(()=>null);
     if(!vw||!vh||!isFinite(dur)) throw new Error("This clip couldn't be read.");
     const P=makeProc(vw,vh); const {PW,PH}=P; const prev=$("#previewCanvas"); prev.width=PW/2; prev.height=PH/2; const pg=prev.getContext("2d");
     const frames=[]; let prevGray=null; let n=0; const gA=new Uint8Array(PW*PH), gB=new Uint8Array(PW*PH); const ring=[];
@@ -1910,6 +1914,20 @@ async function analyze(file,opts){
         else { flags.push("Body tracking couldn't place the bat in enough frames, so the bat path was skipped."); step("bat","skip"); }
       }catch(e){ if(JOB.abort) throw e; const code=e&&e.code; flags.push("Bat tracing was skipped ("+(code||e.message||"error")+"). Check your connection the first time; the body-tracking model downloads once."); step("bat","skip"); }
     } else step("bat","skip");
+    // ---- physics pass: combine rulers (ball + bat), game-day air, drag + backspin + wind, pitch out of the hand, collision check
+    if(window.SLPhys){ try{
+      const fused=SLPhys.fuseScale(SPC, scaleSource==="scale from ball size"? scale:null, diam, A.bat? window.__batLenPx : null);
+      if(fused && !known && Math.abs(fused.scale/scale-1)>0.005){ const r=scale/fused.scale; scale=fused.scale; A.scale=scale;
+        A.ev*=r; if(A.pitch) A.pitch*=r; if(A.batSpeed) A.batSpeed*=r; if(A.bounceFt!=null) A.bounceFt*=r;
+        A.scaleSource=fused.parts.length>1? "scale from ball size + bat length" : A.scaleSource; }
+      const wx=await Promise.race([wxP,new Promise(r=>setTimeout(()=>r(null),6000))]);
+      if(wx){ let tail=0; if(homeF&&Number.isFinite(homeF.cfBearing)){ const to=(wx.windFrom+180)%360; tail=wx.windMph*Math.cos((to-homeF.cfBearing)*Math.PI/180); }
+        A.wx={tempF:Math.round(wx.tempF),rh:Math.round(wx.rh),windMph:Math.round(wx.windMph),windFrom:Math.round(wx.windFrom),tailMph:Math.round(tail*10)/10,rho:+wx.rho.toFixed(3),where:wx.where}; }
+      if(A.la>=5){ const fl=SLPhys.flight(SPC,A.ev,A.la,2.8,A.wx? {rho:A.wx.rho,tailMph:A.wx.tailMph}:null); A.carry=fl.dist; A.apex=fl.apex; A.hang=fl.hang; A.spinEst=fl.rpm; }
+      if(A.pitch){ A.pitchRel=SLPhys.releaseSpeed(SPC,A.pitch,A.wx,Math.max(10,(SPC.dist||43)-(SPC.ext||4)-3)); }
+      if(A.batSpeed && A.pitch){ const mx=SLPhys.maxExit(SPC,A.pitch,A.batSpeed); if(A.ev>mx+4) flags.push(`Exit velo (${Math.round(A.ev)}) is more than this bat speed and pitch can produce (about ${Math.round(mx)} max), so one of the readings is off.`); }
+      window.__phys={fused,wx:A.wx,ev:A.ev,pitchRel:A.pitchRel,carry:A.carry};
+    }catch(e){ console.warn("physics",e); } }
     checkAbort();
     // ---- render
     step("render","on"); prog(0.75,"Drawing the overlay video…");
@@ -1925,7 +1943,7 @@ async function analyzeAndSave(file,batter,note,sessionId,opts){
   catch(e){ if(!e||!e.retry||JOB.abort) throw e; document.querySelectorAll("#steps li").forEach(li=>li.className=""); prog(0.02,"The numbers looked off, so reading the clip again more slowly…"); res=await analyze(file,{...opts,_retry:true}); }
   const {A,out}=res;
   const rec={ sport:SPORT, batter, note, sessionId:sessionId||null, createdAt:new Date().toISOString(), by:S.myId||null, source:"phone", clip:file.name.slice(0,120),
-    ev:round(A.ev,1), la:round(A.la,1), result:A.result, carry:A.carry?round(A.carry,0):null, apex:A.apex?round(A.apex,1):null, hang:A.hang?round(A.hang,2):null,
+    pitchRel:A.pitchRel?round(A.pitchRel,1):null, wx:A.wx||null, spinEst:A.spinEst||null, ev:round(A.ev,1), la:round(A.la,1), result:A.result, carry:A.carry?round(A.carry,0):null, apex:A.apex?round(A.apex,1):null, hang:A.hang?round(A.hang,2):null,
     bounceFt:A.bounceFt!=null?round(A.bounceFt,1):null, pitch:A.pitch?round(A.pitch,1):null, l2c:A.l2c?round(A.l2c,3):null, batSpeed:A.batSpeed?round(A.batSpeed,1):null,
     evRange:`${Math.round(A.ev*0.9)}–${Math.round(A.ev*1.1)} mph`, scaleSource:A.scaleSource, slowFactor:A.k, flags:A.flags, mime:out.mime, batPath:!!A.bat };
   let saved=false, saveMsg="";

@@ -5,7 +5,7 @@ const ok = (c, m) => { console.log((c ? "ok   " : "FAIL ") + m); if (!c) bad++; 
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
 scripts.forEach((s, i) => { try { new vm.Script(s); ok(true, `inline script ${i + 1} parses`); } catch (e) { ok(false, `inline script ${i + 1}: ${e.message}`); } });
-try { new vm.Script(fs.readFileSync(path.join(root, "js/store.js"), "utf8")); ok(true, "js/store.js parses"); } catch (e) { ok(false, "js/store.js: " + e.message); }
+for (const f of ["js/store.js","js/physics.js"]) { try { new vm.Script(fs.readFileSync(path.join(root, f), "utf8")); ok(true, f + " parses"); } catch (e) { ok(false, f + ": " + e.message); } }
 ok(!html.includes("window.claude"), "no Claude-only window.claude calls");
 ok(!html.includes("/_blob/"), "no Claude-only /_blob/ video links");
 ok(html.includes('src="js/store.js"'), "store.js is loaded");
