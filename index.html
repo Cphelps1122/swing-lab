@@ -1682,10 +1682,20 @@ async function renderVideo(A,vw,vh,PW){
   const paint=(t,final)=>{ g.drawImage(vid,0,0,OW,OH); drawOverlay(g,A,t,final,OW,OH,sc); if(inset && (final || t>=A.bat.t0-0.1*A.k)) paintInset(t,final); drawPanel(g,A,OW,OH, final?1:Math.max(0,Math.min(1,(t-A.tc)/(0.1*A.k))), final); drawLegend(g,A,OW,OH); drawTag(g, final?"FULL SWING + BALL PATH":(A.k>=2||rate<1?`SLOW MOTION · 1/${Math.round(A.k/rate)} SPEED`:"REAL SPEED"),OW,OH); pg.drawImage(cv,0,0,prev.width,prev.height); };
   await seekTo(t0); paint(t0,false);
   rec.start(250);
-  await playFrames(t0,t1,rate,(t)=>{ curT=t; paint(t,false); prog(0.75+0.18*(t-t0)/(t1-t0),"Drawing the overlay video…"); });
+  const onF=(t)=>{ curT=t; paint(t,false); prog(0.75+0.18*(t-t0)/(t1-t0),"Drawing the overlay video…"); };
+  // play up to contact, freeze on the frame where bat meets ball, then play on
+  const fdt=A.fdt||1/30, tcF=Math.max(t0,Math.round(A.tc/fdt)*fdt);
+  if(tcF>t0+fdt && tcF<t1-fdt){
+    await playFrames(t0,tcF-0.5*fdt,rate,onF); checkAbort();
+    await seekTo(tcF+0.25*fdt);
+    const U=OH/720, badge=()=>{ g.save(); g.font=`700 ${16*U}px "IBM Plex Sans",sans-serif`; const w=g.measureText("CONTACT").width+28*U; g.fillStyle="rgba(255,235,60,.95)"; roundRect(g,(OW-w)/2,16*U,w,32*U,8*U); g.fill(); g.fillStyle="#111"; g.fillText("CONTACT",(OW-w)/2+14*U,38*U); g.restore(); };
+    const hold=(ms)=>new Promise(res=>{ const end=performance.now()+ms; const iv=setInterval(()=>{ paint(A.tc,false); badge(); if(performance.now()>end){ clearInterval(iv); res(); } },66); });
+    paint(A.tc,false); badge(); await hold(1600);
+    await playFrames(tcF+0.5*fdt,t1,rate,onF);
+  } else await playFrames(t0,t1,rate,onF);
   checkAbort();
-  // final hold on contact frame
-  await seekTo(A.tc+1.5*A.fdt); paint(A.tc,true);
+  // final hold: the contact frame with the full swing and ball path drawn
+  await seekTo(tcF+0.25*fdt); paint(A.tc,true);
   const poster=await new Promise(r=>{ const p=document.createElement("canvas"); p.width=640; p.height=Math.round(640*OH/OW); p.getContext("2d").drawImage(cv,0,0,p.width,p.height); p.toBlob(r,"image/jpeg",0.82); });
   const holdEnd=performance.now()+3200; await new Promise(res=>{ const iv=setInterval(()=>{ paint(A.tc,true); if(performance.now()>holdEnd){ clearInterval(iv); res(); } },66); });
   await new Promise(res=>{ rec.onstop=res; rec.stop(); });
